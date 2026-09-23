@@ -22,6 +22,7 @@ window.BRANCHES = [
 
 window.HOTLINE = "17827";
 window.WHATSAPP_NUMBER = "201040101101"; // رقم واتساب افتراضي (فرع المنصورة) — عدّله من الإدارة لو مختلف
+window.ADMIN_PASSWORD = "soltan2026"; // ⚠️ غيّر الباسورد ده لحاجة خاصة بيك قبل النشر الفعلي
 
 window.CATEGORIES = [
   { id: "offers",     label: "عروض السلطان" },

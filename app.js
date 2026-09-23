@@ -10,7 +10,8 @@
     customer: { name:"", phone:"", address:"", notes:"" },
     orders: JSON.parse(localStorage.getItem("soltan_orders") || "[]"),
     adminTab: "orders",    // orders | items
-    isAdmin: false,
+    isAdmin: sessionStorage.getItem("soltan_admin_auth") === "1",
+    loginError: false,
     editingItemId: null,   // null = not editing, "new" = new item, else existing id
     localItems: JSON.parse(localStorage.getItem("soltan_local_items") || "null")
   };
@@ -285,11 +286,33 @@
     `;
   }
 
+  function renderAdminLogin(){
+    return `
+      <div class="section">
+        <div class="section-title"><span class="bar"></span>دخول الإدارة</div>
+        <div class="empty-state" style="padding:16px; text-align:right;">
+          <p style="line-height:1.7;">الصفحة دي محمية — أدخل كلمة السر الخاصة بالإدارة عشان تكمل.</p>
+        </div>
+        <div class="form-group">
+          <label>كلمة السر</label>
+          <input type="password" id="adminPasswordInput" placeholder="••••••••" autocomplete="off">
+        </div>
+        ${state.loginError ? `<p style="color:var(--ember); font-size:13px; margin-bottom:10px;">كلمة السر غلط، حاول تاني</p>` : ``}
+        <button class="btn-primary" id="adminLoginBtn">دخول</button>
+      </div>
+    `;
+  }
+
   function renderAdminScreen(){
+    if(!state.isAdmin){
+      return renderAdminLogin();
+    }
+
     const tabs = `
       <div class="admin-tabs">
         <div class="admin-tab ${state.adminTab==='orders'?'active':''}" data-admin-tab="orders">الطلبات</div>
         <div class="admin-tab ${state.adminTab==='items'?'active':''}" data-admin-tab="items">الأصناف</div>
+        <div class="admin-tab" id="adminLogoutBtn" style="flex:0.6; color:var(--ember);">خروج</div>
       </div>
     `;
 
@@ -571,6 +594,39 @@
         render();
       });
     });
+
+    const adminLoginBtn = document.getElementById("adminLoginBtn");
+    if(adminLoginBtn){
+      const tryLogin = ()=>{
+        const input = document.getElementById("adminPasswordInput");
+        if(input && input.value === window.ADMIN_PASSWORD){
+          state.isAdmin = true;
+          state.loginError = false;
+          sessionStorage.setItem("soltan_admin_auth", "1");
+          render();
+        } else {
+          state.loginError = true;
+          render();
+        }
+      };
+      adminLoginBtn.addEventListener("click", tryLogin);
+      const pwInput = document.getElementById("adminPasswordInput");
+      if(pwInput){
+        pwInput.addEventListener("keydown", (e)=>{
+          if(e.key === "Enter") tryLogin();
+        });
+      }
+    }
+
+    const adminLogoutBtn = document.getElementById("adminLogoutBtn");
+    if(adminLogoutBtn){
+      adminLogoutBtn.addEventListener("click", ()=>{
+        state.isAdmin = false;
+        sessionStorage.removeItem("soltan_admin_auth");
+        state.adminTab = "orders";
+        render();
+      });
+    }
     document.querySelectorAll("[data-edit-item]").forEach(el=>{
       el.addEventListener("click", ()=>{
         state.editingItemId = el.dataset.editItem;
