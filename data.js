@@ -22,7 +22,8 @@ window.BRANCHES = [
 
 window.HOTLINE = "17827";
 window.WHATSAPP_NUMBER = "201040101101"; // رقم واتساب افتراضي (فرع المنصورة) — عدّله من الإدارة لو مختلف
-window.ADMIN_PASSWORD = "soltan2026"; // ⚠️ غيّر الباسورد ده لحاجة خاصة بيك قبل النشر الفعلي
+// ملحوظة: كلمة سر الإدارة بقت محمية عن طريق Firebase Authentication (إيميل + باسورد)
+// بدل ما تكون مكتوبة هنا في الكود — أضبطها من لوحة Firebase Console مباشرة.
 
 window.CATEGORIES = [
   { id: "offers",     label: "عروض السلطان" },

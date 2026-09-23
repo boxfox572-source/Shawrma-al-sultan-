@@ -398,6 +398,22 @@ window.SOLTAN_LOGO_SVG = `
   <text x="100" y="182" font-family="Arial" font-weight="900" font-size="26" fill="#1a1210" text-anchor="middle">شاورما السلطان</text>
 </svg>`;
 </script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script>
+  const firebaseConfig = {
+    apiKey: "AIzaSyBsDleCDM-e5_mgF_7Y8OLXXrGb3_37pQU",
+    authDomain: "shawarma-al-soltan.firebaseapp.com",
+    projectId: "shawarma-al-soltan",
+    storageBucket: "shawarma-al-soltan.firebasestorage.app",
+    messagingSenderId: "71115455841",
+    appId: "1:71115455841:web:58a59c30e42c6e4b729920"
+  };
+  firebase.initializeApp(firebaseConfig);
+  window.db = firebase.firestore();
+  window.auth = firebase.auth();
+</script>
 <script src="promo_data.js"></script>
 <script src="data.js"></script>
 <script src="app.js"></script>

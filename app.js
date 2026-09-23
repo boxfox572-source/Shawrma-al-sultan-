@@ -8,39 +8,76 @@
     cart: {},              // { itemId: qty }
     orderType: "delivery", // delivery | pickup
     customer: { name:"", phone:"", address:"", notes:"" },
-    orders: JSON.parse(localStorage.getItem("soltan_orders") || "[]"),
+    orders: [],             // loaded live from Firestore (admin only)
+    menuItems: [],          // loaded live from Firestore; falls back to window.MENU_ITEMS until first snapshot arrives
+    menuLoaded: false,
     adminTab: "orders",    // orders | items
-    isAdmin: sessionStorage.getItem("soltan_admin_auth") === "1",
-    loginError: false,
+    isAdmin: false,
+    authChecked: false,
+    loginError: "",
     editingItemId: null,   // null = not editing, "new" = new item, else existing id
-    localItems: JSON.parse(localStorage.getItem("soltan_local_items") || "null")
+    savingItem: false
   };
 
-  // ---------- Local menu overrides (layered on top of data.js) ----------
-  // If the admin has made edits, state.localItems holds the FULL current
-  // menu array (a working copy of window.MENU_ITEMS). Otherwise we fall
-  // back to window.MENU_ITEMS untouched.
-  function getMenuItems(){
-    return state.localItems || window.MENU_ITEMS;
-  }
-  function ensureLocalCopy(){
-    if(!state.localItems){
-      state.localItems = JSON.parse(JSON.stringify(window.MENU_ITEMS));
-    }
-  }
-  function saveLocalItems(){
-    localStorage.setItem("soltan_local_items", JSON.stringify(state.localItems));
-  }
-  function resetLocalItems(){
-    state.localItems = null;
-    localStorage.removeItem("soltan_local_items");
-  }
+  let ordersUnsub = null;
+  let menuUnsub = null;
 
-  function saveOrders(){
-    localStorage.setItem("soltan_orders", JSON.stringify(state.orders));
+  // ---------- Firestore-backed menu ----------
+  function getMenuItems(){
+    return state.menuLoaded ? state.menuItems : window.MENU_ITEMS;
   }
 
   function findItem(id){ return getMenuItems().find(i => i.id === id); }
+
+  function startMenuListener(){
+    if(!window.db) return;
+    window.db.collection("menuItems").orderBy("order", "asc").onSnapshot((snap)=>{
+      const items = [];
+      snap.forEach(doc => items.push({ id: doc.id, ...doc.data() }));
+      state.menuItems = items;
+      state.menuLoaded = true;
+      render();
+    }, (err)=>{
+      console.error("menu listener error", err);
+    });
+  }
+
+  // one-time migration helper: if Firestore menu is empty, seed it from data.js
+  async function seedMenuIfEmpty(){
+    if(!window.db) return;
+    try{
+      const snap = await window.db.collection("menuItems").limit(1).get();
+      if(snap.empty){
+        const batch = window.db.batch();
+        window.MENU_ITEMS.forEach((it, idx)=>{
+          const ref = window.db.collection("menuItems").doc();
+          const { id, ...rest } = it;
+          batch.set(ref, { ...rest, order: idx });
+        });
+        await batch.commit();
+      }
+    }catch(e){
+      console.error("seed error", e);
+    }
+  }
+
+  // ---------- Orders (Firestore) ----------
+  function startOrdersListener(){
+    if(!window.db) return;
+    if(ordersUnsub) ordersUnsub();
+    ordersUnsub = window.db.collection("orders").orderBy("time", "desc").limit(100)
+      .onSnapshot((snap)=>{
+        const orders = [];
+        snap.forEach(doc => orders.push({ id: doc.id, ...doc.data() }));
+        state.orders = orders;
+        render();
+      }, (err)=>{
+        console.error("orders listener error", err);
+      });
+  }
+  function stopOrdersListener(){
+    if(ordersUnsub){ ordersUnsub(); ordersUnsub = null; }
+  }
 
   function cartCount(){
     return Object.values(state.cart).reduce((a,b)=>a+b, 0);
@@ -81,7 +118,6 @@
   }
 
   function fmtPhone(p){
-    // display as groups for readability, keep tel: href raw
     return p;
   }
 
@@ -192,6 +228,7 @@
 
     const itemsHtml = ids.map(id => {
       const it = findItem(id);
+      if(!it) return "";
       const qty = state.cart[id];
       return `
         <div class="cart-item">
@@ -291,19 +328,26 @@
       <div class="section">
         <div class="section-title"><span class="bar"></span>دخول الإدارة</div>
         <div class="empty-state" style="padding:16px; text-align:right;">
-          <p style="line-height:1.7;">الصفحة دي محمية — أدخل كلمة السر الخاصة بالإدارة عشان تكمل.</p>
+          <p style="line-height:1.7;">الصفحة دي محمية بحساب إدارة آمن. سجّل دخول بالإيميل وكلمة السر بتاعة الإدارة.</p>
+        </div>
+        <div class="form-group">
+          <label>الإيميل</label>
+          <input type="email" id="adminEmailInput" placeholder="admin@example.com" autocomplete="off">
         </div>
         <div class="form-group">
           <label>كلمة السر</label>
           <input type="password" id="adminPasswordInput" placeholder="••••••••" autocomplete="off">
         </div>
-        ${state.loginError ? `<p style="color:var(--ember); font-size:13px; margin-bottom:10px;">كلمة السر غلط، حاول تاني</p>` : ``}
+        ${state.loginError ? `<p style="color:var(--ember); font-size:13px; margin-bottom:10px;">${state.loginError}</p>` : ``}
         <button class="btn-primary" id="adminLoginBtn">دخول</button>
       </div>
     `;
   }
 
   function renderAdminScreen(){
+    if(!state.authChecked){
+      return `<div class="empty-state"><div class="icon">⏳</div><p>جاري التحقق...</p></div>`;
+    }
     if(!state.isAdmin){
       return renderAdminLogin();
     }
@@ -317,19 +361,19 @@
     `;
 
     if(state.adminTab === "orders"){
-      const orders = [...state.orders].reverse();
+      const orders = state.orders;
       const list = orders.map(o => `
         <div class="order-card">
           <div class="top-row">
-            <span class="ord-id">طلب #${o.id}</span>
+            <span class="ord-id">طلب #${o.id.slice(-6)}</span>
             <span class="status-badge ${o.status}">${statusLabel(o.status)}</span>
           </div>
           <div class="items-list">
-            ${o.items.map(i => `${i.name} × ${i.qty}`).join("<br>")}
+            ${(o.items||[]).map(i => `${i.name} × ${i.qty}`).join("<br>")}
           </div>
           <div class="items-list" style="margin-bottom:10px;">
-            👤 ${o.customer.name} — 📞 ${o.customer.phone}<br>
-            ${o.orderType === 'delivery' ? `🛵 ${o.customer.address}` : `🏬 استلام: ${o.branch||''}`}
+            👤 ${o.customer?.name||''} — 📞 ${o.customer?.phone||''}<br>
+            ${o.orderType === 'delivery' ? `🛵 ${o.customer?.address||''}` : `🏬 استلام: ${o.branch||''}`}
             <br>💰 الإجمالي: ${o.total} ج.م
           </div>
           <select class="status-select" data-order-id="${o.id}">
@@ -343,13 +387,12 @@
       return `<div class="section"><div class="section-title"><span class="bar"></span>إدارة الطلبات</div>${tabs}${list}</div>`;
     }
 
-    // items tab — full add/edit/delete + export to data.js
+    // items tab — full add/edit/delete, synced live to Firestore
     if(state.editingItemId !== null){
       return `<div class="section"><div class="section-title"><span class="bar"></span>${state.editingItemId==='new' ? 'إضافة صنف جديد' : 'تعديل الصنف'}</div>${renderItemEditForm()}</div>`;
     }
 
     const items = getMenuItems();
-    const dirty = !!state.localItems;
 
     const list = items.map(it => `
       <div class="item-card">
@@ -376,17 +419,9 @@
 
         <button class="btn-primary" id="addNewItemBtn" style="margin-bottom:14px;">+ إضافة صنف جديد</button>
 
-        ${dirty ? `
-        <div class="empty-state" style="padding:14px; text-align:right; border:1px solid var(--gold); border-radius:14px; margin-bottom:14px;">
-          <p style="line-height:1.7; font-size:13px;">⚠️ عندك تعديلات محفوظة على <b>هذا الموبايل بس</b>. عشان الزباين التانيين يشوفوا نفس التعديلات، اضغط "تصدير الكود" وانسخه في ملف <b>data.js</b> على GitHub.</p>
-        </div>
-        <button class="btn-primary" id="exportCodeBtn" style="background:var(--gold); color:#1a1210; margin-bottom:10px;">📋 تصدير الكود لـ data.js</button>
-        <button class="admin-tab" id="resetLocalBtn" style="width:100%; margin-bottom:14px; color:var(--ember);">إلغاء كل التعديلات المحلية</button>
-        ` : `
         <div class="empty-state" style="padding:14px; text-align:right; margin-bottom:14px;">
-          <p style="line-height:1.7; font-size:13px;">التعديلات بتتحفظ على موبايلك، وبعدين تقدر تصدّر الكود الجاهز وتلزقه في <b>data.js</b> على GitHub عشان تظهر لكل الزباين.</p>
+          <p style="line-height:1.7; font-size:13px;">أي تعديل هنا بيظهر فورًا لكل الزباين، على كل الأجهزة.</p>
         </div>
-        `}
 
         <div class="item-grid">${list}</div>
       </div>
@@ -396,7 +431,7 @@
   function renderItemEditForm(){
     const isNew = state.editingItemId === "new";
     const item = isNew
-      ? { id:"", cat: window.CATEGORIES[0].id, name:"", desc:"", price:"", img:"🍽️" }
+      ? { cat: window.CATEGORIES[0].id, name:"", desc:"", price:"", img:"🍽️" }
       : getMenuItems().find(i => i.id === state.editingItemId) || {};
 
     const catOptions = window.CATEGORIES.map(c =>
@@ -425,17 +460,13 @@
         <input type="text" id="editImg" placeholder="🌯" value="${item.img && item.img !== 'PROMO' ? item.img : ''}">
       </div>
       <div style="display:flex; gap:10px; margin-top:6px;">
-        <button class="btn-primary" id="saveItemBtn" style="flex:1;">${isNew ? 'إضافة الصنف' : 'حفظ التعديل'}</button>
+        <button class="btn-primary" id="saveItemBtn" style="flex:1;" ${state.savingItem?'disabled':''}>${state.savingItem ? 'جاري الحفظ...' : (isNew ? 'إضافة الصنف' : 'حفظ التعديل')}</button>
         <button class="admin-tab" id="cancelEditBtn" style="flex:1;">إلغاء</button>
       </div>
     `;
   }
 
-  function slugify(text){
-    return "item-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2,6);
-  }
-
-  function saveItemFromForm(){
+  async function saveItemFromForm(){
     const cat = document.getElementById("editCat").value;
     const name = document.getElementById("editName").value.trim();
     const desc = document.getElementById("editDesc").value.trim();
@@ -446,76 +477,37 @@
     if(!name){ showToast("من فضلك أدخل اسم الصنف"); return; }
     if(isNaN(price) || price < 0){ showToast("من فضلك أدخل سعر صحيح"); return; }
 
-    ensureLocalCopy();
-
-    if(state.editingItemId === "new"){
-      state.localItems.push({ id: slugify(name), cat, name, desc, price, img });
-      showToast("تمت إضافة الصنف");
-    } else {
-      const idx = state.localItems.findIndex(i => i.id === state.editingItemId);
-      if(idx > -1){
-        const prevFeatured = state.localItems[idx].featured;
-        const prevImg = state.localItems[idx].img === 'PROMO' ? 'PROMO' : img;
-        state.localItems[idx] = { ...state.localItems[idx], cat, name, desc, price, img: prevImg, featured: prevFeatured };
-      }
-      showToast("تم حفظ التعديل");
-    }
-
-    saveLocalItems();
-    state.editingItemId = null;
+    state.savingItem = true;
     render();
-  }
 
-  function deleteItem(id){
-    ensureLocalCopy();
-    state.localItems = state.localItems.filter(i => i.id !== id);
-    saveLocalItems();
-    showToast("تم حذف الصنف");
-    render();
-  }
-
-  function exportItemsCode(){
-    const items = getMenuItems();
-    const lines = items.map(it => {
-      const imgVal = it.img === 'PROMO' ? `"PROMO"` : JSON.stringify(it.img);
-      const featuredLine = it.featured ? `,\n    featured: true` : "";
-      return `  {\n    id: ${JSON.stringify(it.id)},\n    cat: ${JSON.stringify(it.cat)},\n    name: ${JSON.stringify(it.name)},\n    desc: ${JSON.stringify(it.desc)},\n    price: ${it.price},\n    img: ${imgVal}${featuredLine}\n  }`;
-    });
-    const code = `window.MENU_ITEMS = [\n${lines.join(",\n")}\n];`;
-
-    // Show in a simple prompt-like overlay via textarea for copy
-    const ta = document.createElement("textarea");
-    ta.value = code;
-    ta.style.position = "fixed";
-    ta.style.top = "-1000px";
-    document.body.appendChild(ta);
-    ta.select();
     try{
-      document.execCommand("copy");
-      showToast("تم نسخ الكود! الصقه في data.js مكان MENU_ITEMS");
+      if(state.editingItemId === "new"){
+        const maxOrder = state.menuItems.reduce((m,i)=>Math.max(m, i.order||0), 0);
+        await window.db.collection("menuItems").add({ cat, name, desc, price, img, order: maxOrder+1 });
+        showToast("تمت إضافة الصنف للجميع");
+      } else {
+        const existing = state.menuItems.find(i=>i.id===state.editingItemId);
+        const finalImg = existing && existing.img === 'PROMO' ? 'PROMO' : img;
+        await window.db.collection("menuItems").doc(state.editingItemId).update({ cat, name, desc, price, img: finalImg });
+        showToast("تم حفظ التعديل للجميع");
+      }
+      state.editingItemId = null;
     }catch(e){
-      showToast("انسخ الكود يدويًا من المربع اللي ظهر");
+      console.error(e);
+      showToast("حصل خطأ أثناء الحفظ، حاول تاني");
     }
-    document.body.removeChild(ta);
-
-    // Also open a visible modal with the code as fallback for manual copy
-    showExportModal(code);
+    state.savingItem = false;
+    render();
   }
 
-  function showExportModal(code){
-    const overlay = document.createElement("div");
-    overlay.style.cssText = "position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:200; display:flex; align-items:center; justify-content:center; padding:20px;";
-    overlay.innerHTML = `
-      <div style="background:var(--char-3); border:1px solid var(--line); border-radius:16px; padding:16px; max-width:440px; width:100%; max-height:80vh; display:flex; flex-direction:column; gap:10px;">
-        <div style="font-weight:800; font-size:15px;">الكود الجاهز — انسخه والصقه في data.js</div>
-        <textarea readonly style="flex:1; min-height:280px; background:var(--char-2); border:1px solid var(--line); border-radius:10px; color:var(--bone); padding:10px; font-family:monospace; font-size:11px; direction:ltr; text-align:left;">${code}</textarea>
-        <button class="btn-primary" id="closeExportModal">تم</button>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-    document.getElementById("closeExportModal").addEventListener("click", ()=>{
-      document.body.removeChild(overlay);
-    });
+  async function deleteItem(id){
+    try{
+      await window.db.collection("menuItems").doc(id).delete();
+      showToast("تم حذف الصنف للجميع");
+    }catch(e){
+      console.error(e);
+      showToast("حصل خطأ أثناء الحذف");
+    }
   }
 
   function statusLabel(s){
@@ -597,15 +589,22 @@
 
     const adminLoginBtn = document.getElementById("adminLoginBtn");
     if(adminLoginBtn){
-      const tryLogin = ()=>{
-        const input = document.getElementById("adminPasswordInput");
-        if(input && input.value === window.ADMIN_PASSWORD){
-          state.isAdmin = true;
-          state.loginError = false;
-          sessionStorage.setItem("soltan_admin_auth", "1");
+      const tryLogin = async ()=>{
+        const emailInput = document.getElementById("adminEmailInput");
+        const pwInput = document.getElementById("adminPasswordInput");
+        const email = emailInput ? emailInput.value.trim() : "";
+        const pw = pwInput ? pwInput.value : "";
+        if(!email || !pw){
+          state.loginError = "من فضلك أدخل الإيميل وكلمة السر";
           render();
-        } else {
-          state.loginError = true;
+          return;
+        }
+        state.loginError = "";
+        try{
+          await window.auth.signInWithEmailAndPassword(email, pw);
+          // onAuthStateChanged handler will update state.isAdmin and re-render
+        }catch(e){
+          state.loginError = "الإيميل أو كلمة السر غلط";
           render();
         }
       };
@@ -620,9 +619,8 @@
 
     const adminLogoutBtn = document.getElementById("adminLogoutBtn");
     if(adminLogoutBtn){
-      adminLogoutBtn.addEventListener("click", ()=>{
-        state.isAdmin = false;
-        sessionStorage.removeItem("soltan_admin_auth");
+      adminLogoutBtn.addEventListener("click", async ()=>{
+        await window.auth.signOut();
         state.adminTab = "orders";
         render();
       });
@@ -647,21 +645,14 @@
     const cancelEditBtn = document.getElementById("cancelEditBtn");
     if(cancelEditBtn) cancelEditBtn.addEventListener("click", ()=>{ state.editingItemId = null; render(); });
 
-    const exportBtn = document.getElementById("exportCodeBtn");
-    if(exportBtn) exportBtn.addEventListener("click", exportItemsCode);
-
-    const resetBtn = document.getElementById("resetLocalBtn");
-    if(resetBtn) resetBtn.addEventListener("click", ()=>{
-      if(confirm("هيتم إلغاء كل التعديلات المحلية والرجوع لأصناف data.js الأصلية. متأكد؟")){
-        resetLocalItems();
-        showToast("تم إلغاء التعديلات المحلية");
-        render();
-      }
-    });
     document.querySelectorAll("[data-order-id]").forEach(el=>{
-      el.addEventListener("change", ()=>{
-        const ord = state.orders.find(o=>o.id===el.dataset.orderId);
-        if(ord){ ord.status = el.value; saveOrders(); render(); }
+      el.addEventListener("change", async ()=>{
+        try{
+          await window.db.collection("orders").doc(el.dataset.orderId).update({ status: el.value });
+        }catch(e){
+          console.error(e);
+          showToast("حصل خطأ أثناء تحديث الحالة");
+        }
       });
     });
 
@@ -680,7 +671,7 @@
     });
   }
 
-  function submitOrder(){
+  async function submitOrder(){
     if(Object.keys(state.cart).length === 0) return;
     if(!state.customer.name || !state.customer.phone){
       showToast("من فضلك أدخل الاسم ورقم الهاتف");
@@ -695,25 +686,56 @@
     const branchName = branchSelect ? window.BRANCHES.find(b=>b.id===branchSelect.value)?.name : "";
 
     const order = {
-      id: Date.now().toString().slice(-6),
       items: Object.keys(state.cart).map(id => {
         const it = findItem(id);
         return { id, name: it.name, qty: state.cart[id], price: it.price };
       }),
       total: cartTotal(),
       orderType: state.orderType,
-      branch: branchName,
+      branch: branchName || "",
       customer: { ...state.customer },
       status: "pending",
-      time: new Date().toISOString()
+      time: firebase.firestore.FieldValue.serverTimestamp()
     };
 
-    state.orders.push(order);
-    saveOrders();
-    state.cart = {};
-    showToast(`تم إرسال الطلب #${order.id} بنجاح 🎉`);
-    go("menu");
+    const confirmBtn = document.getElementById("confirmOrderBtn");
+    if(confirmBtn){ confirmBtn.disabled = true; confirmBtn.textContent = "جاري الإرسال..."; }
+
+    try{
+      const ref = await window.db.collection("orders").add(order);
+      state.cart = {};
+      showToast(`تم إرسال الطلب #${ref.id.slice(-6)} بنجاح 🎉`);
+      go("menu");
+    }catch(e){
+      console.error(e);
+      showToast("حصل خطأ أثناء إرسال الطلب، حاول تاني");
+      render();
+    }
   }
 
+  // ---------- Auth state wiring ----------
+  function initAuth(){
+    if(!window.auth){
+      state.authChecked = true;
+      render();
+      return;
+    }
+    window.auth.onAuthStateChanged((user)=>{
+      state.isAdmin = !!user;
+      state.authChecked = true;
+      if(user){
+        startOrdersListener();
+      } else {
+        stopOrdersListener();
+        state.orders = [];
+      }
+      render();
+    });
+  }
+
+  // ---------- Boot ----------
   render();
+  startMenuListener();
+  seedMenuIfEmpty();
+  initAuth();
 })();
